@@ -1,589 +1,560 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>ميزان — لوحة وليّ الأمر</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800;900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-
-<script type="module">
-import { initializeApp }  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, doc, getDoc, getDocs, onSnapshot,
-         collection, query, orderBy, where, limit, serverTimestamp }
-                          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
-// Firebase الوحيدة (masar-5db30)
-const config = {
-  apiKey:            "AIzaSyDeBAgXm6L3NPTitSuzkS37ZFoyy_UvMHk",
-  authDomain:        "masar-5db30.firebaseapp.com",
-  databaseURL:       "https://masar-5db30-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId:         "masar-5db30",
-  storageBucket:     "masar-5db30.firebasestorage.app",
-  messagingSenderId: "909223400853",
-  appId:             "1:909223400853:web:a64c4e243de8c1dc15d29c"
-};
-
-const singleApp = initializeApp(config);
-const parentDb  = getFirestore(singleApp);
-const mainDb    = parentDb; // نفس قاعدة البيانات
-
-const G       = id => document.getElementById(id);
-const setText = (id,v) => { const e=G(id); if(e) e.textContent=v; };
-const fmt     = n => n>=1000?(n/1000).toFixed(1)+'K':String(n);
-const fmtH    = s => {
-  if(!s||s===0) return '٠ دقيقة';
-  if(s>=3600) return (s/3600).toFixed(1)+' ساعة';
-  if(s>=60)   return Math.floor(s/60)+' دقيقة';
-  return s+' ثانية';
-};
-const fmtHShort = s => s>=3600?(s/3600).toFixed(1)+'س':s>=60?Math.floor(s/60)+'د':s+'ث';
-
-window.toast = (msg,type='info') => {
-  const t=G('toast'); t.textContent=msg; t.className='toast show t-'+type;
-  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),4000);
-};
-
-function getStudentRank(pts) {
-  if(pts<=100)  return {title:'المكافح',         icon:'💪',color:'#94a3b8'};
-  if(pts<=500)  return {title:'المجتهد',         icon:'📚',color:'#60a5fa'};
-  if(pts<=1000) return {title:'الدكتور',         icon:'🎓',color:'#a78bfa'};
-  return              {title:'أسطورة الـ 2026', icon:'🏆',color:'#f2b830'};
-}
-
-let currentUid=null, allSessions=[], unsubStudent=null;
-
-window.doSearch = async () => {
-  const raw  = G('code-input').value.trim().toUpperCase().replace(/\s/g,'');
-  const code = raw.startsWith('MZ') ? raw : 'MZ'+raw;
-  if(code.length<6) return toast('الكود يجب أن يكون MZ + 4 أرقام','err');
-
-  const btn=G('search-btn');
-  btn.disabled=true; btn.textContent='⏳';
-
-  try {
-    // البحث مباشرة في codes collection بنفس كود التفعيل
-    const codeSnap = await getDoc(doc(mainDb,'codes', code));
-    if(!codeSnap.exists())                   { toast('الكود غير موجود ❌','err'); return; }
-    if(codeSnap.data().status !== 'used')    { toast('هذا الكود لم يُفعَّل بعد ❌','err'); return; }
-    if(!codeSnap.data().uid)                 { toast('لا يوجد طالب مرتبط بهذا الكود','err'); return; }
-
-    const studentUid = codeSnap.data().uid;
-    const userSnap   = await getDoc(doc(mainDb,'users', studentUid));
-    if(!userSnap.exists()) { toast('بيانات الطالب غير موجودة','err'); return; }
-
-    await openDashboard(studentUid, userSnap.data());
-  } catch(e) {
-    console.error(e);
-    toast('خطأ في الاتصال، حاول مجدداً','err');
-  } finally {
-    btn.disabled=false; btn.textContent='🔍 دخول';
-  }
-};
-
-async function openDashboard(uid, data) {
-  currentUid=uid;
-  if(unsubStudent){unsubStudent();unsubStudent=null;}
-  G('search-screen').style.display='none';
-  G('dashboard').style.display='block';
-  G('back-btn').style.display='block';
-  G('refresh-btn').style.display='block';
-
-  // متابعة حية من users مباشرة
-  unsubStudent=onSnapshot(doc(mainDb,'users',uid), snap=>{
-    if(!snap.exists()) return;
-    renderStudentCard(snap.data());
-  });
-
-  renderStudentCard(data);
-  await loadSessions(uid);
-  await loadRanking(uid, data);
-}
-
-function renderStudentCard(u) {
-  const rank=getStudentRank(u.totalPts||0);
-  setText('s-name',  u.name  ||'الطالب');
-  setText('s-branch',u.branch==='علمي'?'🔬 الفرع العلمي':'📖 الفرع الأدبي');
-  G('s-rank').textContent=rank.icon+' '+rank.title;
-  G('s-rank').style.color=rank.color;
-  setText('s-pts',   fmt(u.totalPts||0));
-  setText('s-hrs',   fmtH(u.totalSec||0));
-  G('s-av').textContent=(u.name||'؟')[0];
-
-  const levels=[0,100,500,1000,9999];
-  const pts=u.totalPts||0;
-  let lMin=0,lMax=100;
-  for(let i=0;i<levels.length-1;i++){
-    if(pts>=levels[i]&&pts<levels[i+1]){lMin=levels[i];lMax=levels[i+1];break;}
-  }
-  const pct=Math.min(100,((pts-lMin)/(lMax-lMin))*100);
-  G('rank-bar').style.width=pct+'%';
-  G('rank-bar').style.background=`linear-gradient(90deg,${rank.color},rgba(255,255,255,.2))`;
-  setText('rank-bar-lbl', pts+' / '+lMax+' نقطة للمستوى التالي');
-}
-
-async function loadSessions(uid) {
-  try {
-    // نجرب أولاً من Firebase الجديدة
-    let snap;
-    try {
-      const q=query(collection(parentDb,'sessions'),where('uid','==',uid),orderBy('ts','desc'),limit(60));
-      snap=await getDocs(q);
-    } catch(e1){
-      const q=query(collection(parentDb,'sessions'),where('uid','==',uid),limit(60));
-      snap=await getDocs(q);
-    }
-    allSessions=[];
-    snap.forEach(d=>allSessions.push({id:d.id,...d.data()}));
-
-    // إذا ما في بيانات، نجرب من Firebase الأصلية
-    if(allSessions.length===0){
-      try{
-        const q2=query(collection(mainDb,'sessions'),where('uid','==',uid),orderBy('ts','desc'),limit(60));
-        const snap2=await getDocs(q2);
-        snap2.forEach(d=>allSessions.push({id:d.id,...d.data()}));
-      }catch(e2){
-        const q2=query(collection(mainDb,'sessions'),where('uid','==',uid),limit(60));
-        const snap2=await getDocs(q2);
-        snap2.forEach(d=>allSessions.push({id:d.id,...d.data()}));
-      }
-    }
-
-    // نرتب محلياً
-    allSessions.sort((a,b)=>{
-      const ta=a.ts?.seconds||0, tb=b.ts?.seconds||0;
-      return tb-ta;
-    });
-
-    renderStats(); renderAlerts(); renderWeekChart(); renderSubjects(); renderRecentSessions();
-  } catch(e){ console.error('sessions error',e); }
-}
-
-async function loadRanking(uid, userData) {
-  try {
-    const q=query(collection(mainDb,'users'),orderBy('totalPts','desc'),limit(100));
-    const snap=await getDocs(q);
-    let rank=0,myRank='—';
-    snap.forEach(d=>{
-      const u=d.data();
-      if((u.totalPts||0)>0||(u.totalSec||0)>0) rank++;
-      if(d.id===uid) myRank='#'+rank;
-    });
-    setText('s-rank-pos',myRank);
-    setText('s-rank-pos2',myRank);
-
-    const sqId=userData.squadId;
-    if(sqId){
-      const sqSnap=await getDoc(doc(mainDb,'squads',sqId));
-      if(sqSnap.exists()){
-        const sq=sqSnap.data();
-        setText('s-squad',sq.badge+' '+sq.name);
-        const sqQ=query(collection(mainDb,'squads'),orderBy('totalPts','desc'));
-        const sqAll=await getDocs(sqQ);
-        let sqR=0,mySqR='—';
-        sqAll.forEach(d=>{sqR++;if(d.id===sqId)mySqR='#'+sqR;});
-        setText('s-squad-rank',mySqR);
-        const members=[];
-        for(const mid of (sq.members||[])){
-          const ms=await getDoc(doc(mainDb,'users',mid));
-          if(ms.exists()) members.push({uid:mid,...ms.data()});
-        }
-        members.sort((a,b)=>(b.totalPts||0)-(a.totalPts||0));
-        const inTeam=members.findIndex(m=>m.uid===uid)+1;
-        setText('s-team-rank','#'+inTeam+' من '+members.length);
-      }
-    } else {
-      setText('s-squad','بدون فريق');
-      setText('s-squad-rank','—');
-      setText('s-team-rank','—');
-    }
-  } catch(e){ console.error('ranking',e); }
-}
-
-function renderStats() {
-  const now=new Date();
-  const todayStart=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
-  const weekStart=todayStart-6*86400000;
-  let todaySec=0,todayN=0,weekSec=0,weekN=0,lastTs=0;
-  allSessions.forEach(s=>{
-    const ts=s.ts?.seconds?s.ts.seconds*1000:(typeof s.ts==='number'?s.ts:0);
-    if(ts>=todayStart){todaySec+=s.seconds||0;todayN++;}
-    if(ts>=weekStart){weekSec+=s.seconds||0;weekN++;}
-    if(ts>lastTs) lastTs=ts;
-  });
-  setText('today-hrs',  fmtH(todaySec));
-  setText('today-sess', todayN+' جلسة');
-  setText('week-hrs',   fmtH(weekSec));
-  setText('week-sess',  weekN+' جلسة');
-  if(lastTs>0){
-    const diff=Math.floor((Date.now()-lastTs)/60000);
-    let str;
-    if(diff<2)         str='الآن 🟢';
-    else if(diff<60)   str='منذ '+diff+' دقيقة';
-    else if(diff<1440) str='منذ '+Math.floor(diff/60)+' ساعة';
-    else               str='منذ '+Math.floor(diff/1440)+' يوم';
-    setText('last-act',str);
-    G('last-dot').style.background=diff<60?'#4ade80':'#f87171';
-    G('last-dot').style.boxShadow =diff<60?'0 0 8px #4ade80':'0 0 8px #f87171';
-  } else {
-    setText('last-act','لم يبدأ بعد');
-    G('last-dot').style.background='#475569';
-    G('last-dot').style.boxShadow='none';
-  }
-}
-
-function renderAlerts() {
-  const now=new Date();
-  const todayStart=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
-  let todaySec=0,lastTs=0;
-  allSessions.forEach(s=>{
-    const ts=s.ts?.seconds?s.ts.seconds*1000:0;
-    if(ts>=todayStart) todaySec+=s.seconds||0;
-    if(ts>lastTs) lastTs=ts;
-  });
-  const mins=lastTs>0?Math.floor((Date.now()-lastTs)/60000):99999;
-  const alerts=[];
-  if(allSessions.length===0){
-    alerts.push({t:'danger',i:'🚨',m:'لم يبدأ الطالب أي جلسة بعد'});
-  } else if(mins>1440){
-    alerts.push({t:'danger',i:'⚠️',m:'غاب لأكثر من '+Math.floor(mins/1440)+' يوم'});
-  } else if(mins>480){
-    alerts.push({t:'warn',i:'⏰',m:'لا نشاط منذ '+Math.floor(mins/60)+' ساعة'});
-  }
-  if(allSessions.length>0&&todaySec===0){
-    alerts.push({t:'danger',i:'📵',m:'لم يدرس اليوم بعد'});
-  } else if(todaySec>0&&todaySec<7200){
-    alerts.push({t:'warn',i:'📉',m:'ساعات اليوم أقل من ساعتين ('+fmtH(todaySec)+')'});
-  }
-  if(todaySec>=7200)  alerts.push({t:'ok',i:'🌟',m:'ممتاز! درس '+fmtH(todaySec)+' اليوم 🎉'});
-  if(todaySec>=14400) alerts.push({t:'ok',i:'🏆',m:'أربع ساعات أو أكثر — أسطورة! 🔥'});
-
-  const w=G('alerts-wrap');
-  if(alerts.length===0){w.innerHTML='<div class="al-item ok"><span>✅</span><span>كل شيء تمام، الطالب ملتزم 👍</span></div>';return;}
-  w.innerHTML=alerts.map(a=>`<div class="al-item ${a.t}"><span class="al-icon">${a.i}</span><span>${a.m}</span></div>`).join('');
-}
-
-function renderWeekChart() {
-  const now=new Date();
-  const days=[];
-  for(let i=6;i>=0;i--){
-    const d=new Date(now.getFullYear(),now.getMonth(),now.getDate()-i);
-    days.push({label:['أحد','اثنين','ثلا','أربع','خميس','جمعة','سبت'][d.getDay()],start:d.getTime(),end:d.getTime()+86400000,secs:0});
-  }
-  const subMap={};
-  allSessions.forEach(s=>{
-    const ts=s.ts?.seconds?s.ts.seconds*1000:0;
-    days.forEach(d=>{if(ts>=d.start&&ts<d.end)d.secs+=s.seconds||0;});
-    if(s.subject) subMap[s.subject]=(subMap[s.subject]||0)+(s.seconds||0);
-  });
-  const activeDays=days.filter(d=>d.secs>0).length;
-  const weekSec=days.reduce((a,b)=>a+b.secs,0);
-  let topSubj='—',topSec=0;
-  Object.entries(subMap).forEach(([k,v])=>{if(v>topSec){topSec=v;topSubj=k;}});
-  setText('top-subj',   topSubj);
-  setText('week-total', fmtH(weekSec));
-  setText('commit-rate',activeDays+'/7 أيام');
-
-  const maxSec=Math.max(...days.map(d=>d.secs),1);
-  const todayIdx=days.findIndex(d=>d.start<=Date.now()&&Date.now()<d.end);
-  G('week-chart').innerHTML=days.map((d,i)=>{
-    const h=Math.round((d.secs/maxSec)*100);
-    const isT=i===todayIdx;
-    return `<div class="bc"><div class="bt">${d.secs>0?fmtHShort(d.secs):''}</div>
-      <div class="bo"><div class="bf${isT?' td':''}" style="height:${h}%"></div></div>
-      <div class="bd${isT?' td':''}">${d.label}</div></div>`;
-  }).join('');
-}
-
-function renderSubjects() {
-  const subMap={};
-  allSessions.forEach(s=>{if(s.subject)subMap[s.subject]=(subMap[s.subject]||0)+(s.seconds||0);});
-  const sorted=Object.entries(subMap).sort((a,b)=>b[1]-a[1]);
-  const total=sorted.reduce((a,b)=>a+b[1],0)||1;
-  const colors=['#22d3ee','#a78bfa','#4ade80','#f2b830','#f87171','#60a5fa','#fb923c'];
-  const w=G('subj-wrap');
-  if(sorted.length===0){w.innerHTML='<div class="empty-msg">لا يوجد بيانات بعد</div>';return;}
-  w.innerHTML=sorted.map(([s,sec],i)=>{
-    const pct=Math.round((sec/total)*100);
-    return `<div class="sr"><div class="si"><span class="sd" style="background:${colors[i%colors.length]}"></span><span class="sn">${s}</span></div>
-      <div class="sb-w"><div class="sbf" style="width:${pct}%;background:${colors[i%colors.length]}"></div></div>
-      <span class="sp">${pct}%</span><span class="st2">${fmtHShort(sec)}</span></div>`;
-  }).join('');
-}
-
-function renderRecentSessions() {
-  const w=G('sessions-wrap');
-  const recent=allSessions.slice(0,5);
-  if(recent.length===0){w.innerHTML='<div class="empty-msg">لا يوجد جلسات بعد</div>';return;}
-  w.innerHTML=recent.map(s=>{
-    const ts=s.ts?.seconds?s.ts.seconds*1000:0;
-    const d=ts?new Date(ts):null;
-    const dateStr=d?`${d.getDate()}/${d.getMonth()+1} — ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`:'—';
-    return `<div class="sess-row">
-      <div class="sess-subj">${s.subject||'—'}</div>
-      <div class="sess-info">
-        <span class="sess-dur">${fmtHShort(s.seconds||0)}</span>
-        <span class="sess-pts">+${s.pts||0}⚡</span>
-        <span class="sess-date">${dateStr}</span>
-      </div></div>`;
-  }).join('');
-}
-
-window.backToSearch = () => {
-  if(unsubStudent){unsubStudent();unsubStudent=null;}
-  currentUid=null; allSessions=[];
-  G('dashboard').style.display    ='none';
-  G('search-screen').style.display='flex';
-  G('back-btn').style.display     ='none';
-  G('refresh-btn').style.display  ='none';
-  G('code-input').value='';
-};
-
-window.refreshData = async () => {
-  if(!currentUid) return;
-  toast('جاري التحديث…','info');
-  await loadSessions(currentUid);
-  const snap=await getDoc(doc(mainDb,'users',currentUid));
-  if(snap.exists()) await loadRanking(currentUid, snap.data());
-  toast('تم التحديث ✅','ok');
-};
-
-document.addEventListener('DOMContentLoaded',()=>{
-  G('code-input')?.addEventListener('keydown',e=>{if(e.key==='Enter')window.doSearch();});
-});
-</script>
-
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<title>بوابة ولي الأمر — Mizan Academy IQ</title>
+<script src="https://www.gstatic.com/firebasejs/9.17.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.17.1/firebase-firestore-compat.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
 <style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#06080f;--c1:#0f1624;--c2:#162035;--c3:#1e2d48;
-  --gold:#f2b830;--gd:#d4950a;--teal:#2dd4bf;--blue:#60a5fa;
-  --purp:#a78bfa;--grn:#4ade80;--red:#f87171;--amb:#fbbf24;
-  --ink:#e2e8f8;--ink2:#94a3b8;--ink3:#475569;--br:rgba(255,255,255,.055);--r:15px;
+  --bg:#F6F4EF;
+  --card:#FFFFFF;
+  --line:#E8E3D8;
+  --teal:#0E7C6B;
+  --teal-deep:#0A5C4F;
+  --teal-soft:#E3F2EE;
+  --ink:#1E2A2D;
+  --muted:#7A8783;
+  --faint:#B7C0BC;
+  --green:#1D8A5A; --greenBg:#E5F5EB;
+  --amber:#B4790C; --amberBg:#FBF0DA;
+  --red:#C4392B;   --redBg:#FBE9E6;
+  --r-sm:10px;--r:16px;--r-lg:22px;--r-xl:28px;
 }
-html,body{height:100%;background:var(--bg);color:var(--ink);font-family:'Tajawal',sans-serif;direction:rtl}
-body{background-image:radial-gradient(ellipse 70% 50% at 80% 5%,rgba(167,139,250,.07) 0%,transparent 55%),radial-gradient(ellipse 55% 40% at 5% 90%,rgba(242,184,48,.05) 0%,transparent 55%)}
-body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(var(--br) 1px,transparent 1px),linear-gradient(90deg,var(--br) 1px,transparent 1px);background-size:56px 56px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{font-family:'Cairo',sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;line-height:1.6;-webkit-font-smoothing:antialiased;}
+::-webkit-scrollbar{width:5px;}
+::-webkit-scrollbar-thumb{background:var(--faint);border-radius:4px;}
 
-.topbar{position:sticky;top:0;z-index:200;display:flex;align-items:center;justify-content:space-between;padding:.8rem 1.2rem;background:rgba(6,8,15,.88);backdrop-filter:blur(20px);border-bottom:1px solid var(--br)}
-.brand{display:flex;align-items:center;gap:.6rem}
-.brand-logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--purp),#7c3aed);display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:900;color:#fff;box-shadow:0 0 16px rgba(167,139,250,.3);flex-shrink:0}
-.brand-name{font-size:1rem;font-weight:900;background:linear-gradient(135deg,var(--purp) 40%,rgba(255,255,255,.9));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.brand-sub{font-size:.62rem;color:var(--ink3)}
-.tb-btns{display:flex;gap:.4rem}
-.tb-btn{background:var(--c1);border:1px solid var(--br);color:var(--ink2);font-family:'Tajawal',sans-serif;font-size:.78rem;padding:.4rem .85rem;border-radius:8px;cursor:pointer;display:none;transition:all .2s}
-.tb-btn:hover{color:var(--purp);border-color:rgba(167,139,250,.4)}
+/* TOAST */
+#toastShelf{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;width:min(380px,92vw);}
+.toast{padding:14px 18px;border-radius:var(--r);font-weight:700;font-size:.88rem;display:flex;align-items:center;gap:10px;pointer-events:auto;box-shadow:0 10px 30px rgba(0,0,0,.12);background:var(--card);border:1px solid var(--line);}
+.toast.s{color:var(--teal-deep);}
+.toast.e{color:var(--red);}
+.toast.w{color:var(--amber);}
 
-#search-screen{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:calc(100vh - 56px);padding:2rem 1rem;gap:1.2rem}
-.sh-hero{text-align:center}
-.sh-icon{font-size:3.5rem;display:block;margin-bottom:.8rem;animation:float 3.5s ease-in-out infinite}
-@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
-.sh-hero h1{font-size:1.7rem;font-weight:900;margin-bottom:.4rem}
-.sh-hero h1 span{background:linear-gradient(135deg,var(--purp),var(--teal));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.sh-hero p{font-size:.85rem;color:var(--ink2);line-height:1.6}
-.search-card{background:var(--c1);border:1px solid var(--br);border-radius:var(--r);padding:1.8rem;width:100%;max-width:400px}
-.search-card label{display:block;font-size:.8rem;color:var(--ink2);margin-bottom:.5rem;font-weight:600}
-.sr-row{display:flex;gap:.6rem}
-.code-inp{flex:1;background:var(--c2);border:1.5px solid var(--br);color:var(--ink);font-family:'IBM Plex Mono',monospace;font-size:1.1rem;letter-spacing:3px;padding:.88rem 1rem;border-radius:10px;outline:none;text-align:center;direction:ltr;transition:border-color .2s}
-.code-inp:focus{border-color:rgba(167,139,250,.5);box-shadow:0 0 0 3px rgba(167,139,250,.08)}
-.code-inp::placeholder{color:var(--ink3);letter-spacing:0;font-size:.88rem}
-.search-go{background:linear-gradient(135deg,var(--purp),#7c3aed);color:#fff;border:none;font-family:'Tajawal',sans-serif;font-size:.95rem;font-weight:800;padding:.88rem 1.4rem;border-radius:10px;cursor:pointer;white-space:nowrap;transition:all .2s}
-.search-go:hover{opacity:.88;transform:translateY(-1px)}
-.search-go:disabled{opacity:.6;cursor:not-allowed;transform:none}
-.hint-box{margin-top:1rem;background:rgba(167,139,250,.05);border:1px solid rgba(167,139,250,.15);border-radius:9px;padding:.85rem 1rem}
-.hint-box p{font-size:.78rem;color:var(--ink2);line-height:1.65}
-.hint-box strong{color:var(--purp)}
+/* LOADER */
+#gLoader{display:none;position:fixed;inset:0;background:rgba(246,244,239,.92);z-index:9998;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+#gLoader.on{display:flex;}
+.loader-ring{width:46px;height:46px;border:4px solid var(--teal-soft);border-top-color:var(--teal);border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+#gLoaderMsg{font-weight:700;color:var(--muted);font-size:.9rem;}
 
-#dashboard{display:none;position:relative;z-index:1;max-width:480px;margin:0 auto;padding:1rem 1rem 4rem}
-@keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+/* LOGIN */
+#loginScreen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
+.login-box{width:100%;max-width:380px;text-align:center;}
+.login-emblem{width:68px;height:68px;margin:0 auto 20px;background:var(--teal);border-radius:22px;display:flex;align-items:center;justify-content:center;box-shadow:0 10px 26px rgba(14,124,107,.28);}
+.login-emblem i{font-size:1.7rem;color:#fff;}
+.login-box h1{font-size:1.4rem;font-weight:900;margin-bottom:6px;color:var(--ink);}
+.login-box p{color:var(--muted);font-size:.87rem;margin-bottom:28px;}
+.login-box input{width:100%;padding:17px;background:var(--card);border:2px solid var(--line);border-radius:var(--r);color:var(--ink);font-family:'Cairo';font-weight:800;font-size:1.15rem;text-align:center;letter-spacing:2px;outline:none;margin-bottom:14px;}
+.login-box input:focus{border-color:var(--teal);}
+.login-box input::placeholder{letter-spacing:0;font-weight:600;color:var(--faint);font-size:.92rem;}
+.btn-teal{width:100%;padding:17px;border-radius:var(--r);background:var(--teal);color:#fff;font-family:'Cairo';font-weight:900;font-size:1rem;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 8px 20px rgba(14,124,107,.25);}
+.btn-teal:active{transform:scale(.98);}
+.quick-chip{display:inline-flex;align-items:center;gap:8px;background:var(--card);border:1px dashed var(--line);color:var(--muted);font-family:'Cairo';font-weight:700;font-size:.82rem;padding:10px 18px;border-radius:20px;cursor:pointer;margin-top:16px;}
+.login-help{color:var(--faint);font-size:.78rem;margin-top:22px;display:flex;align-items:center;justify-content:center;gap:6px;}
 
-.stu-card{background:linear-gradient(135deg,rgba(167,139,250,.08),rgba(45,212,191,.04));border:1px solid rgba(167,139,250,.2);border-radius:var(--r);padding:1.4rem;margin-bottom:.8rem;animation:fadeUp .4s ease both;display:flex;gap:1rem;align-items:flex-start}
-.s-av{width:3.2rem;height:3.2rem;border-radius:50%;flex-shrink:0;background:linear-gradient(135deg,var(--purp),#7c3aed);display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:900;color:#fff}
-.s-body{flex:1;min-width:0}
-.s-nm{font-size:1.2rem;font-weight:900;margin-bottom:.15rem}
-.s-br{font-size:.76rem;color:var(--ink2);margin-bottom:.4rem}
-.s-rnk{font-size:.78rem;font-weight:700;margin-bottom:.65rem}
-.s-nums{display:flex;gap:.8rem;margin-bottom:.7rem}
-.s-num .nv{font-size:1rem;font-weight:800;color:var(--purp);font-family:'IBM Plex Mono',monospace}
-.s-num .nl{font-size:.65rem;color:var(--ink3)}
-.rbar-wrap .rbar-bg{height:.32rem;background:var(--c3);border-radius:99px;overflow:hidden;margin-bottom:.2rem}
-.rbar-fill{height:100%;border-radius:99px;transition:width .9s ease;width:0%}
-.rbar-lbl{font-size:.67rem;color:var(--ink3)}
+/* APP */
+#app{display:none;}
+#app.on{display:block;}
+.topbar{position:sticky;top:0;z-index:100;background:rgba(246,244,239,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:14px 18px;display:flex;align-items:center;gap:12px;min-height:58px;}
+.topbar-back{background:var(--card);border:1px solid var(--line);width:36px;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--teal);flex-shrink:0;}
+.topbar-back.hidden{visibility:hidden;}
+.topbar-title{font-weight:900;font-size:1rem;flex:1;}
+.btn-logout{background:transparent;border:none;color:var(--muted);font-size:1rem;cursor:pointer;padding:6px;}
 
-.sec-hd{font-size:.75rem;font-weight:700;color:var(--ink3);text-transform:uppercase;letter-spacing:.08em;margin:1.3rem 0 .6rem;display:flex;align-items:center;gap:.4rem}
-.sec-hd::after{content:'';flex:1;height:1px;background:var(--br)}
+.wrap{max-width:600px;margin:0 auto;padding:18px 16px 60px;}
+.screen{display:none;}
+.screen.on{display:block;animation:fadeIn .25s ease;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
 
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.6rem}
-.stat-box{background:var(--c1);border:1px solid var(--br);border-radius:12px;padding:1rem;animation:fadeUp .4s ease both}
-.stat-box .sv{font-size:1.05rem;font-weight:800;font-family:'IBM Plex Mono',monospace;margin-bottom:.1rem}
-.stat-box .sl{font-size:.68rem;color:var(--ink2)}
-.stat-box .ss{font-size:.68rem;color:var(--ink3);margin-top:.1rem}
-.stat-box.a .sv{color:var(--purp)}.stat-box.b .sv{color:var(--teal)}
+/* ── HOME: student summary card ── */
+.summary-card{background:var(--teal);border-radius:var(--r-xl);padding:24px 22px;margin-bottom:18px;color:#fff;position:relative;overflow:hidden;}
+.summary-card::after{content:'';position:absolute;left:-30px;bottom:-40px;width:140px;height:140px;border-radius:50%;background:rgba(255,255,255,.06);}
+.summary-top{display:flex;align-items:center;gap:14px;margin-bottom:16px;position:relative;z-index:1;}
+.summary-avatar{width:52px;height:52px;border-radius:16px;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:1.2rem;font-weight:900;flex-shrink:0;}
+.summary-name{font-size:1.1rem;font-weight:900;}
+.summary-code{font-size:.76rem;opacity:.75;font-weight:600;margin-top:2px;}
+.summary-verdict{position:relative;z-index:1;font-size:.85rem;font-weight:600;opacity:.95;background:rgba(255,255,255,.12);border-radius:var(--r);padding:12px 14px;display:flex;align-items:center;gap:10px;}
+.summary-verdict .letter{width:34px;height:34px;border-radius:10px;background:#fff;color:var(--teal-deep);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:.95rem;flex-shrink:0;}
 
-.la-card{background:var(--c1);border:1px solid var(--br);border-radius:12px;padding:1rem;display:flex;align-items:center;gap:.8rem;animation:fadeUp .4s ease both;margin-bottom:.6rem}
-.la-dot{width:.55rem;height:.55rem;border-radius:50%;background:var(--grn);box-shadow:0 0 7px var(--grn);flex-shrink:0;transition:all .5s}
-.la-lbl{font-size:.72rem;color:var(--ink2)}
-.la-val{font-size:.95rem;font-weight:700}
+/* Quick stat chips row on home */
+.chip-row{display:flex;gap:9px;margin-bottom:22px;}
+.chip{flex:1;background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:14px 8px;text-align:center;}
+.chip-val{font-size:1.15rem;font-weight:900;color:var(--ink);}
+.chip-lbl{font-size:.68rem;color:var(--muted);font-weight:700;margin-top:3px;}
 
-.rk-card{background:var(--c1);border:1px solid var(--br);border-radius:12px;padding:1rem;display:grid;grid-template-columns:1fr 1fr;gap:.6rem;animation:fadeUp .4s ease both}
-.rk-item .rl{font-size:.68rem;color:var(--ink2);margin-bottom:.2rem}
-.rk-item .rv{font-size:1rem;font-weight:800;color:var(--gold);font-family:'IBM Plex Mono',monospace}
+/* Menu list group (iOS settings style) */
+.menu-label{font-size:.78rem;font-weight:800;color:var(--muted);margin:0 4px 8px;}
+.menu-group{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;margin-bottom:22px;}
+.menu-row{display:flex;align-items:center;gap:14px;padding:16px 16px;cursor:pointer;border-bottom:1px solid var(--line);}
+.menu-row:last-child{border-bottom:none;}
+.menu-row:active{background:var(--teal-soft);}
+.menu-icon{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
+.menu-body{flex:1;min-width:0;}
+.menu-title{font-weight:800;font-size:.93rem;color:var(--ink);}
+.menu-sub{font-size:.76rem;color:var(--muted);font-weight:600;margin-top:2px;}
+.menu-chevron{color:var(--faint);font-size:.85rem;}
 
-.al-box{background:var(--c1);border:1px solid var(--br);border-radius:12px;padding:.8rem;animation:fadeUp .4s ease both}
-.al-item{display:flex;align-items:flex-start;gap:.55rem;padding:.55rem;border-radius:8px;margin-bottom:.35rem;font-size:.8rem}
-.al-item:last-child{margin-bottom:0}
-.al-item.danger{background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);color:#fca5a5}
-.al-item.warn{background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.2);color:#fde68a}
-.al-item.ok{background:rgba(74,222,128,.07);border:1px solid rgba(74,222,128,.2);color:#6ee7b7}
-.al-icon{font-size:.95rem;flex-shrink:0;margin-top:.05rem}
+/* ── LIST SCREENS ── */
+.filter-row{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
+.filter-chip{padding:8px 16px;border-radius:20px;border:1px solid var(--line);background:var(--card);color:var(--muted);font-family:'Cairo';font-weight:700;font-size:.8rem;cursor:pointer;}
+.filter-chip.on{background:var(--teal);color:#fff;border-color:var(--teal);}
 
-.wc-card{background:var(--c1);border:1px solid var(--br);border-radius:12px;padding:1rem;animation:fadeUp .4s ease both}
-#week-chart{display:flex;align-items:flex-end;gap:.3rem;height:85px;margin-bottom:.5rem}
-.bc{flex:1;display:flex;flex-direction:column;align-items:center;gap:.18rem;height:100%}
-.bt{font-size:.5rem;color:var(--ink3);height:13px;display:flex;align-items:center;font-family:'IBM Plex Mono',monospace;white-space:nowrap}
-.bo{flex:1;width:100%;background:var(--c3);border-radius:.25rem;overflow:hidden;display:flex;align-items:flex-end}
-.bf{width:100%;border-radius:.25rem;background:var(--purp);opacity:.45;transition:height 1s ease;min-height:2px}
-.bf.td{opacity:1;background:linear-gradient(to top,var(--purp),var(--teal))}
-.bd{font-size:.6rem;color:var(--ink3)}.bd.td{color:var(--purp);font-weight:700}
-.week-sum{display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-top:.7rem}
-.wi .wl{font-size:.65rem;color:var(--ink2);margin-bottom:.15rem}
-.wi .wv{font-size:.88rem;font-weight:800;color:var(--ink)}
+.list-group{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;margin-bottom:14px;}
+.list-row{display:flex;align-items:center;gap:13px;padding:15px 16px;border-bottom:1px solid var(--line);}
+.list-row:last-child{border-bottom:none;}
+.list-icon{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:.88rem;flex-shrink:0;}
+.list-body{flex:1;min-width:0;}
+.list-title{font-weight:800;font-size:.9rem;color:var(--ink);}
+.list-sub{font-size:.74rem;color:var(--muted);font-weight:600;margin-top:2px;}
+.list-value{padding:6px 14px;border-radius:20px;font-weight:900;font-size:.86rem;white-space:nowrap;flex-shrink:0;}
+.list-value.hi{background:var(--greenBg);color:var(--green);}
+.list-value.mid{background:var(--amberBg);color:var(--amber);}
+.list-value.lo{background:var(--redBg);color:var(--red);}
+.list-tag{padding:4px 11px;border-radius:14px;font-size:.68rem;font-weight:800;flex-shrink:0;}
+.list-tag.done{background:var(--greenBg);color:var(--green);}
+.list-tag.pending{background:var(--amberBg);color:var(--amber);}
+.list-tag.missed{background:var(--redBg);color:var(--red);}
 
-.sj-card{background:var(--c1);border:1px solid var(--br);border-radius:12px;padding:1rem;animation:fadeUp .4s ease both}
-.sr{display:flex;align-items:center;gap:.55rem;margin-bottom:.55rem}
-.sr:last-child{margin-bottom:0}
-.si{display:flex;align-items:center;gap:.35rem;min-width:90px}
-.sd{width:.5rem;height:.5rem;border-radius:50%;flex-shrink:0}
-.sn{font-size:.76rem;color:var(--ink)}
-.sb-w{flex:1;height:.4rem;background:var(--c3);border-radius:99px;overflow:hidden}
-.sbf{height:100%;border-radius:99px;transition:width 1s ease}
-.sp{font-size:.68rem;color:var(--ink2);width:2.2rem;text-align:left;font-family:'IBM Plex Mono',monospace}
-.st2{font-size:.68rem;color:var(--ink3);width:2.2rem;text-align:left;font-family:'IBM Plex Mono',monospace}
+.group-header{font-size:.76rem;font-weight:800;color:var(--muted);margin:20px 4px 8px;}
+.group-header:first-child{margin-top:0;}
 
-.sess-card{background:var(--c1);border:1px solid var(--br);border-radius:12px;padding:1rem;animation:fadeUp .4s ease both}
-.sess-row{display:flex;justify-content:space-between;align-items:center;padding:.55rem;border-radius:8px;margin-bottom:.35rem;background:var(--c2);border:1px solid var(--br)}
-.sess-row:last-child{margin-bottom:0}
-.sess-subj{font-size:.8rem;font-weight:700;color:var(--ink);flex-shrink:0;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sess-info{display:flex;align-items:center;gap:.5rem}
-.sess-dur{font-size:.75rem;font-weight:700;color:var(--teal);font-family:'IBM Plex Mono',monospace}
-.sess-pts{font-size:.72rem;color:var(--gold);font-family:'IBM Plex Mono',monospace}
-.sess-date{font-size:.65rem;color:var(--ink3)}
+.comment-note{background:var(--teal-soft);border-radius:var(--r-sm);padding:11px 14px;margin:0 0 14px;font-size:.79rem;color:var(--teal-deep);font-weight:600;}
+.comment-note b{font-weight:900;}
 
-.empty-msg{text-align:center;color:var(--ink3);font-size:.8rem;padding:.8rem}
+/* Attendance ring on its screen */
+.ring-card{background:var(--card);border:1px solid var(--line);border-radius:var(--r-xl);padding:24px;display:flex;align-items:center;gap:18px;margin-bottom:20px;}
+.ring-wrap{position:relative;width:76px;height:76px;flex-shrink:0;}
+.ring-wrap svg{transform:rotate(-90deg);}
+.ring-bg{fill:none;stroke:var(--line);stroke-width:8;}
+.ring-fill{fill:none;stroke:var(--teal);stroke-width:8;stroke-linecap:round;transition:stroke-dashoffset 1s ease;}
+.ring-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:1.1rem;color:var(--ink);}
+.ring-txt b{font-size:.92rem;color:var(--ink);display:block;margin-bottom:3px;}
+.ring-txt span{font-size:.78rem;color:var(--muted);font-weight:600;}
 
-.toast{position:fixed;bottom:1.4rem;left:50%;transform:translateX(-50%);background:var(--c1);border:1px solid var(--br);color:var(--ink);padding:.6rem 1.2rem;border-radius:8px;font-size:.82rem;z-index:9999;opacity:0;pointer-events:none;transition:opacity .3s;white-space:nowrap}
-.toast.show{opacity:1}
-.toast.t-ok{border-color:var(--grn);color:var(--grn)}
-.toast.t-err{border-color:var(--red);color:var(--red)}
-.toast.t-warn{border-color:var(--amb);color:var(--amb)}
+.empty{text-align:center;padding:36px 16px;color:var(--muted);background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);}
+.empty i{font-size:1.7rem;margin-bottom:10px;display:block;color:var(--faint);}
+.empty p{font-size:.85rem;font-weight:600;}
 </style>
 </head>
 <body>
 
-<div class="topbar">
-  <div class="brand">
-    <div class="brand-logo">👨‍👩‍👦</div>
-    <div><div class="brand-name">لوحة وليّ الأمر</div><div class="brand-sub">ميزان Squads</div></div>
-  </div>
-  <div class="tb-btns">
-    <button class="tb-btn" id="refresh-btn" onclick="refreshData()">🔄 تحديث</button>
-    <button class="tb-btn" id="back-btn"    onclick="backToSearch()">← رجوع</button>
+<div id="toastShelf"></div>
+<div id="gLoader"><div class="loader-ring"></div><div id="gLoaderMsg">جاري التحميل...</div></div>
+
+<!-- LOGIN -->
+<div id="loginScreen">
+  <div class="login-box">
+    <div class="login-emblem"><i class="fas fa-user-shield"></i></div>
+    <h1>بوابة ولي الأمر</h1>
+    <p>أدخل كود ابنك أو بنتك لعرض تقريره الدراسي</p>
+    <input id="codeIn" type="text" placeholder="كود الطالب" autocomplete="off"
+      oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn-teal" onclick="doLogin()"><i class="fas fa-arrow-left"></i> عرض التقرير</button>
+    <div style="text-align:center">
+      <button class="quick-chip" id="quickChip" style="display:none" onclick="doLogin()">
+        <i class="fas fa-history"></i><span id="quickChipTxt"></span>
+      </button>
+    </div>
+    <div class="login-help"><i class="fas fa-lock"></i> نفس كود دخول ابنكم للبوابة الطلابية</div>
   </div>
 </div>
 
-<div id="search-screen">
-  <div class="sh-hero">
-    <span class="sh-icon">👨‍👩‍👦</span>
-    <h1>لوحة <span>وليّ الأمر</span></h1>
-    <p>تابع نشاط ابنك الدراسي في الوقت الفعلي</p>
+<!-- APP -->
+<div id="app">
+  <div class="topbar">
+    <div class="topbar-back hidden" id="backBtn" onclick="goHome()"><i class="fas fa-arrow-right"></i></div>
+    <div class="topbar-title" id="topTitle">الميزان</div>
+    <button class="btn-logout" onclick="doLogout()"><i class="fas fa-sign-out-alt"></i></button>
   </div>
-  <div class="search-card">
-    <label>🔑 أدخل الكود الخاص بك</label>
-    <div class="sr-row">
-      <input id="code-input" class="code-inp" type="text" placeholder="MZ1234" maxlength="6" autocomplete="off" spellcheck="false"/>
-      <button id="search-btn" class="search-go" onclick="doSearch()">🔍 دخول</button>
-    </div>
-    <div class="hint-box">
-      <p>📌 نفس الكود اللي اشتراه ابنك للدخول للمنصة <strong>MZ1234</strong> — اطلبه منه مباشرة</p>
-    </div>
-  </div>
-</div>
 
-<div id="dashboard">
+  <div class="wrap">
 
-  <div class="stu-card">
-    <div class="s-av" id="s-av">؟</div>
-    <div class="s-body">
-      <div class="s-nm"  id="s-name">—</div>
-      <div class="s-br"  id="s-branch">—</div>
-      <div class="s-rnk" id="s-rank">—</div>
-      <div class="s-nums">
-        <div class="s-num"><div class="nv" id="s-pts">—</div><div class="nl">نقطة</div></div>
-        <div class="s-num"><div class="nv" id="s-hrs">—</div><div class="nl">مجموع الدراسة</div></div>
-        <div class="s-num"><div class="nv" id="s-rank-pos">—</div><div class="nl">ترتيب عام</div></div>
+    <!-- ══ HOME SCREEN: student card + menu ══ -->
+    <div class="screen on" id="screen-home">
+      <div class="summary-card">
+        <div class="summary-top">
+          <div class="summary-avatar" id="stAvatar"></div>
+          <div>
+            <div class="summary-name" id="stName"></div>
+            <div class="summary-code" id="stCode"></div>
+          </div>
+        </div>
+        <div class="summary-verdict">
+          <div class="letter" id="verdictLetter"></div>
+          <div id="verdictSentence"></div>
+        </div>
       </div>
-      <div class="rbar-wrap">
-        <div class="rbar-bg"><div class="rbar-fill" id="rank-bar"></div></div>
-        <div class="rbar-lbl" id="rank-bar-lbl">—</div>
+
+      <div class="chip-row">
+        <div class="chip"><div class="chip-val" id="statAvg">—</div><div class="chip-lbl">المعدل العام</div></div>
+        <div class="chip"><div class="chip-val" id="statAtt">—</div><div class="chip-lbl">نسبة الحضور</div></div>
+        <div class="chip"><div class="chip-val" id="statExams">—</div><div class="chip-lbl">اختبارات</div></div>
+      </div>
+
+      <div class="menu-label">تفاصيل التقرير</div>
+      <div class="menu-group">
+        <div class="menu-row" onclick="openScreen('results')">
+          <div class="menu-icon" style="background:var(--teal-soft);color:var(--teal)"><i class="fas fa-file-alt"></i></div>
+          <div class="menu-body">
+            <div class="menu-title">نتائج الاختبارات</div>
+            <div class="menu-sub" id="menuResultsSub">—</div>
+          </div>
+          <i class="fas fa-chevron-left menu-chevron"></i>
+        </div>
+        <div class="menu-row" onclick="openScreen('attendance')">
+          <div class="menu-icon" style="background:var(--teal-soft);color:var(--teal)"><i class="fas fa-qrcode"></i></div>
+          <div class="menu-body">
+            <div class="menu-title">سجل الحضور</div>
+            <div class="menu-sub" id="menuAttSub">—</div>
+          </div>
+          <i class="fas fa-chevron-left menu-chevron"></i>
+        </div>
+        <div class="menu-row" onclick="openScreen('grades')">
+          <div class="menu-icon" style="background:var(--teal-soft);color:var(--teal)"><i class="fas fa-chart-bar"></i></div>
+          <div class="menu-body">
+            <div class="menu-title">الدرجات اليومية</div>
+            <div class="menu-sub" id="menuGradesSub">—</div>
+          </div>
+          <i class="fas fa-chevron-left menu-chevron"></i>
+        </div>
       </div>
     </div>
-  </div>
 
-  <div class="sec-hd">🟢 الحالة الآن</div>
-  <div class="la-card">
-    <div class="la-dot" id="last-dot"></div>
-    <div><div class="la-lbl">آخر جلسة دراسية</div><div class="la-val" id="last-act">—</div></div>
-  </div>
-
-  <div class="sec-hd">📊 الإحصائيات</div>
-  <div class="stats-grid">
-    <div class="stat-box a">
-      <div class="sv" id="today-hrs">—</div>
-      <div class="sl">⏱ ساعات اليوم</div>
-      <div class="ss" id="today-sess">—</div>
+    <!-- ══ RESULTS SCREEN ══ -->
+    <div class="screen" id="screen-results">
+      <div id="resultsList"></div>
     </div>
-    <div class="stat-box b">
-      <div class="sv" id="week-hrs">—</div>
-      <div class="sl">📅 ساعات الأسبوع</div>
-      <div class="ss" id="week-sess">—</div>
+
+    <!-- ══ ATTENDANCE SCREEN ══ -->
+    <div class="screen" id="screen-attendance">
+      <div class="ring-card">
+        <div class="ring-wrap">
+          <svg width="76" height="76" viewBox="0 0 76 76">
+            <circle class="ring-bg" cx="38" cy="38" r="32"/>
+            <circle class="ring-fill" id="attRingFill" cx="38" cy="38" r="32" stroke-dasharray="201" stroke-dashoffset="201"/>
+          </svg>
+          <div class="ring-num" id="attRingNum">0%</div>
+        </div>
+        <div class="ring-txt"><b id="attSummaryB"></b><span id="attSummaryP"></span></div>
+      </div>
+      <div id="missGroup"></div>
+      <div id="attList"></div>
     </div>
-  </div>
 
-  <div class="sec-hd">🏆 الترتيب</div>
-  <div class="rk-card">
-    <div class="rk-item"><div class="rl">🌍 ترتيب عام</div><div class="rv" id="s-rank-pos2">—</div></div>
-    <div class="rk-item"><div class="rl">🛡️ ترتيب الفريق</div><div class="rv" id="s-squad-rank" style="color:var(--teal)">—</div></div>
-    <div class="rk-item"><div class="rl">👥 داخل الفريق</div><div class="rv" id="s-team-rank" style="color:var(--grn)">—</div></div>
-    <div class="rk-item"><div class="rl">🛡️ الفريق</div><div class="rv" id="s-squad" style="font-size:.78rem;color:var(--ink)">—</div></div>
-  </div>
-
-  <div class="sec-hd">🚨 التنبيهات</div>
-  <div class="al-box">
-    <div id="alerts-wrap"><div class="al-item ok"><span>⏳</span><span>جاري التحليل…</span></div></div>
-  </div>
-
-  <div class="sec-hd">📅 نشاط الأسبوع</div>
-  <div class="wc-card">
-    <div id="week-chart"></div>
-    <div class="week-sum">
-      <div class="wi"><div class="wl">📚 أكثر مادة</div><div class="wv" id="top-subj">—</div></div>
-      <div class="wi"><div class="wl">⏱ مجموع الأسبوع</div><div class="wv" id="week-total">—</div></div>
-      <div class="wi"><div class="wl">🎯 الالتزام</div><div class="wv" id="commit-rate">—</div></div>
+    <!-- ══ GRADES SCREEN ══ -->
+    <div class="screen" id="screen-grades">
+      <div class="filter-row" id="gradeFilters">
+        <button class="filter-chip on" data-f="all">الكل</button>
+        <button class="filter-chip" data-f="hi">ممتاز</button>
+        <button class="filter-chip" data-f="mid">متوسط</button>
+        <button class="filter-chip" data-f="lo">ضعيف</button>
+      </div>
+      <div id="gradesList"></div>
     </div>
-  </div>
 
-  <div class="sec-hd">📖 توزيع المواد</div>
-  <div class="sj-card">
-    <div id="subj-wrap"><div class="empty-msg">⏳ جاري التحميل…</div></div>
   </div>
-
-  <div class="sec-hd">🕐 آخر الجلسات</div>
-  <div class="sess-card">
-    <div id="sessions-wrap"><div class="empty-msg">⏳ جاري التحميل…</div></div>
-  </div>
-
 </div>
 
-<div id="toast" class="toast"></div>
+<script>
+/* ── Firebase ── */
+firebase.initializeApp({
+  apiKey:     "AIzaSyCL7hbXqwzErzrshZOXjszErbS4t9LSWs8",
+  authDomain: "amimizaniq.firebaseapp.com",
+  projectId:  "amimizaniq",
+  appId:      "1:644598552588:web:fb226a15704bb65c377629"
+});
+const db = firebase.firestore();
+
+let S = { code:null, student:null, results:[], attendance:[], exams:[] };
+let allGrades = [];
+
+const $ = id => document.getElementById(id);
+const esc = s => (s||'').toString().replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function loader(msg=''){ $('gLoaderMsg').textContent=msg; $('gLoader').classList.add('on'); }
+function unloader(){ $('gLoader').classList.remove('on'); }
+
+function toast(msg,type='s',dur=3200){
+  const icons={s:'fa-check-circle',e:'fa-times-circle',w:'fa-exclamation-triangle'};
+  const el=document.createElement('div');
+  el.className=`toast ${type}`;
+  el.innerHTML=`<i class="fas ${icons[type]}"></i><span>${esc(msg)}</span>`;
+  $('toastShelf').appendChild(el);
+  setTimeout(()=>el.remove(),dur);
+}
+
+function parsePct(g){
+  const s=(g??'').toString();
+  if(s.includes('/')){const[a,b]=s.split('/');return(parseFloat(a)/parseFloat(b))*100;}
+  return parseFloat(s)||0;
+}
+function scoreClass(p){ return p>=75?'hi':p>=50?'mid':'lo'; }
+
+function gradeInfo(avg){
+  if(avg>=95) return {letter:'A+',label:'متميز استثنائي'};
+  if(avg>=90) return {letter:'A', label:'ممتاز'};
+  if(avg>=80) return {letter:'B+',label:'جيد جداً مرتفع'};
+  if(avg>=70) return {letter:'B', label:'جيد جداً'};
+  if(avg>=60) return {letter:'C+',label:'جيد'};
+  if(avg>=50) return {letter:'C', label:'مقبول'};
+  if(avg>=40) return {letter:'D', label:'ضعيف'};
+  return               {letter:'F', label:'ضعيف جداً'};
+}
+function verdictSentence(avg, attRate, hasData){
+  if(!hasData) return 'ماكو بيانات كافية بعد لتقييم مستوى الطالب.';
+  if(avg>=85 && attRate>=80) return 'مستوى ممتاز مع التزام جيد بالحضور — استمروا بنفس الدعم.';
+  if(avg>=85) return 'مستوى دراسي ممتاز، لكن الالتزام بالحضور يحتاج تحسين.';
+  if(avg>=60) return 'المستوى جيد وقابل للتطور، متابعتكم البسيطة راح تساعده يرتقي أكثر.';
+  if(attRate<50 && avg<60) return 'المستوى والحضور بحاجة اهتمام فوري — يُفضّل التواصل مع الأستاذ.';
+  return 'المستوى يحتاج اهتمام إضافي، ننصح بمتابعة أقرب مع الطالب.';
+}
+
+/* ── Screen navigation ── */
+const TITLES = { home:'الميزان', results:'نتائج الاختبارات', attendance:'سجل الحضور', grades:'الدرجات اليومية' };
+function openScreen(name){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('on'));
+  $(`screen-${name}`).classList.add('on');
+  $('topTitle').textContent = TITLES[name];
+  $('backBtn').classList.toggle('hidden', name==='home');
+  window.scrollTo(0,0);
+}
+function goHome(){ openScreen('home'); }
+
+/* ── Login ── */
+window.addEventListener('DOMContentLoaded', ()=>{
+  const last=localStorage.getItem('mizan_parent_last_code');
+  if(last){
+    $('codeIn').value=last;
+    $('quickChip').style.display='inline-flex';
+    $('quickChipTxt').textContent=`عرض تقرير: ${last}`;
+  }
+});
+
+async function doLogin(){
+  const code=$('codeIn').value.trim().toUpperCase();
+  if(!code){ toast('يرجى إدخال كود الطالب','w'); return; }
+  loader('التحقق من الكود...');
+  try{
+    const doc=await db.collection('StudentPortal').doc(code).get();
+    if(!doc.exists){ toast('الكود غير مسجّل في النظام','e'); unloader(); return; }
+    S.code=code; S.student=doc.data();
+    localStorage.setItem('mizan_parent_last_code',code);
+    await boot();
+  }catch(e){ toast('خطأ في الاتصال بالخادم','e'); }
+  unloader();
+}
+
+function doLogout(){
+  S={code:null,student:null,results:[],attendance:[],exams:[]};
+  $('loginScreen').style.display='flex';
+  $('app').classList.remove('on');
+  $('codeIn').value='';
+  goHome();
+  toast('تم تسجيل الخروج','s');
+}
+
+/* ── Boot ── */
+async function boot(){
+  loader('جاري تحميل بيانات الطالب...');
+  try{
+    const [resSnap, attSnap, examSnap] = await Promise.all([
+      db.collection('Results').where('studentCode','==',S.code).get(),
+      db.collection('Attendance').where('studentCode','==',S.code).get(),
+      db.collection('Exams').where('studentCode','==',S.code).get()
+    ]);
+    S.results = resSnap.docs.map(d=>({id:d.id, ...d.data()}));
+    S.attendance = attSnap.docs.map(d=>d.data());
+    S.exams = examSnap.docs.map(d=>({id:d.id, ...d.data()}));
+  }catch(e){
+    console.error(e);
+    toast('تعذر تحميل بعض البيانات','w');
+  }
+  render();
+}
+
+function render(){
+  const s=S.student;
+  const init=(s.name||'ط').charAt(0);
+  $('stAvatar').textContent=init;
+  $('stName').textContent=s.name||'—';
+  $('stCode').textContent='كود: '+S.code;
+
+  const grades=s.dailyGrades||[];
+  allGrades=grades;
+  const scores=grades.map(g=>parsePct(g.grade));
+  const dailyAvg=scores.length?(scores.reduce((a,b)=>a+b,0)/scores.length):0;
+
+  const resultScores=S.results.map(r=> r.graded ? (r.finalGrade ?? r.autoGrade) : r.autoGrade);
+  const resAvg=resultScores.length?(resultScores.reduce((a,b)=>a+b,0)/resultScores.length):0;
+
+  const overallAvg = scores.length ? dailyAvg : resAvg;
+  const hasData = scores.length>0 || resultScores.length>0;
+
+  const examsPast=S.exams.filter(e=>e.start && e.start.toDate()<=new Date());
+  const attRate=examsPast.length?Math.round((S.attendance.length/examsPast.length)*100):(S.attendance.length?100:0);
+
+  const gi=gradeInfo(overallAvg);
+  $('verdictLetter').textContent = hasData ? gi.letter : '—';
+  $('verdictSentence').textContent = verdictSentence(overallAvg, attRate, hasData);
+
+  $('statAvg').textContent = hasData ? overallAvg.toFixed(0)+'%' : '—';
+  $('statAtt').textContent = examsPast.length ? attRate+'%' : '—';
+  $('statExams').textContent = S.results.length;
+
+  $('menuResultsSub').textContent = S.results.length ? `${S.results.length} نتيجة مسجلة` : 'لا توجد نتائج بعد';
+  $('menuAttSub').textContent = examsPast.length ? `نسبة الحضور ${attRate}%` : 'لا توجد بيانات بعد';
+  $('menuGradesSub').textContent = grades.length ? `${grades.length} درجة مسجلة` : 'لا توجد درجات بعد';
+
+  renderResults();
+  renderAttendance(examsPast, attRate);
+  bindGradeFilters();
+  renderGrades('all');
+
+  $('loginScreen').style.display='none';
+  $('app').classList.add('on');
+  goHome();
+  toast(`تم تحميل تقرير ${(s.name||'').split(' ')[0]||''}`,'s');
+}
+
+/* ── Results list, grouped by graded/pending ── */
+function renderResults(){
+  if(!S.results.length){
+    $('resultsList').innerHTML='<div class="empty"><i class="fas fa-inbox"></i><p>لا توجد نتائج اختبارات مسجلة بعد</p></div>';
+    return;
+  }
+  const sorted=[...S.results].sort((a,b)=>{
+    const ta=a.submittedAt&&a.submittedAt.toDate?a.submittedAt.toDate():0;
+    const tb=b.submittedAt&&b.submittedAt.toDate?b.submittedAt.toDate():0;
+    return tb-ta;
+  });
+
+  let html='<div class="list-group">';
+  html += sorted.map(r=>{
+    const isGraded = r.graded===true;
+    const score = isGraded ? (r.finalGrade ?? r.autoGrade) : r.autoGrade;
+    const cls = scoreClass(score);
+    const dateStr = r.submittedAt&&r.submittedAt.toDate
+      ? r.submittedAt.toDate().toLocaleDateString('ar-IQ',{day:'numeric',month:'short'})
+      : '—';
+    return `<div class="list-row">
+      <div class="list-icon" style="background:${cls==='hi'?'var(--greenBg)':cls==='mid'?'var(--amberBg)':'var(--redBg)'};color:${cls==='hi'?'var(--green)':cls==='mid'?'var(--amber)':'var(--red)'}"><i class="fas fa-book"></i></div>
+      <div class="list-body">
+        <div class="list-title">${esc(r.subject)}</div>
+        <div class="list-sub">${dateStr} · ${isGraded?'مدقَّق نهائياً':'بانتظار التدقيق'}</div>
+      </div>
+      <div class="list-value ${cls}">${score}%</div>
+    </div>`;
+  }).join('');
+  html += '</div>';
+
+  const comments = sorted.map(r=> r.graded ? (r.answers||[]).find(a=>a.teacherComment) : null).filter(Boolean);
+  if(comments.length){
+    html += '<div class="group-header">ملاحظات المدرّسين</div>';
+    comments.forEach(c=>{ html += `<div class="comment-note">${esc(c.teacherComment)}</div>`; });
+  }
+
+  $('resultsList').innerHTML = html;
+}
+
+/* ── Attendance ── */
+function renderAttendance(examsPast, rate){
+  const circ=201;
+  const offset = circ - (rate/100)*circ;
+  $('attRingFill').style.strokeDasharray = circ;
+  $('attRingFill').style.strokeDashoffset = offset;
+  $('attRingNum').textContent = rate+'%';
+
+  if(examsPast.length){
+    $('attSummaryB').textContent = `سجّل حضور ${S.attendance.length} من ${examsPast.length} اختبار`;
+    $('attSummaryP').textContent = rate>=75 ? 'التزام جيد بالحضور' : rate>=50 ? 'الالتزام متوسط' : 'الالتزام ضعيف، يُنصح بالمتابعة';
+  } else {
+    $('attSummaryB').textContent = 'لا توجد اختبارات سابقة بعد';
+    $('attSummaryP').textContent = '';
+  }
+
+  const attendedIds = new Set(S.attendance.map(a=>a.examId).filter(Boolean));
+  const missed = examsPast.filter(e=>!attendedIds.has(e.id));
+
+  if(missed.length){
+    let mHtml = '<div class="group-header">اختبارات لم يُسجَّل لها حضور</div><div class="list-group">';
+    mHtml += missed.map(e=>{
+      const dt = e.start&&e.start.toDate ? e.start.toDate().toLocaleDateString('ar-IQ',{day:'numeric',month:'short'}) : '';
+      return `<div class="list-row">
+        <div class="list-icon" style="background:var(--redBg);color:var(--red)"><i class="fas fa-exclamation"></i></div>
+        <div class="list-body"><div class="list-title">${esc(e.subject||'اختبار')}</div><div class="list-sub">${dt}</div></div>
+        <div class="list-tag missed">غياب</div>
+      </div>`;
+    }).join('');
+    mHtml += '</div>';
+    $('missGroup').innerHTML = mHtml;
+  } else {
+    $('missGroup').innerHTML = '';
+  }
+
+  if(!S.attendance.length){
+    $('attList').innerHTML = missed.length ? '' : '<div class="empty"><i class="fas fa-inbox"></i><p>لا يوجد سجل حضور بعد</p></div>';
+    return;
+  }
+
+  const sortedAtt=[...S.attendance].sort((a,b)=>{
+    const ta=a.timestamp&&a.timestamp.toDate?a.timestamp.toDate():0;
+    const tb=b.timestamp&&b.timestamp.toDate?b.timestamp.toDate():0;
+    return tb-ta;
+  });
+
+  let html = '<div class="group-header">سجل الحضور</div><div class="list-group">';
+  html += sortedAtt.map(r=>{
+    const t=r.timestamp&&r.timestamp.toDate
+      ? r.timestamp.toDate().toLocaleDateString('ar-IQ',{day:'numeric',month:'short'})
+      : '—';
+    return `<div class="list-row">
+      <div class="list-icon" style="background:var(--greenBg);color:var(--green)"><i class="fas fa-check"></i></div>
+      <div class="list-body"><div class="list-title">${esc(r.subject||'حضور')}</div><div class="list-sub">${t}</div></div>
+      <div class="list-tag done">حضر</div>
+    </div>`;
+  }).join('');
+  html += '</div>';
+  $('attList').innerHTML = html;
+}
+
+/* ── Daily grades ── */
+function bindGradeFilters(){
+  document.querySelectorAll('#gradeFilters .filter-chip').forEach(btn=>{
+    btn.onclick=()=>{
+      document.querySelectorAll('#gradeFilters .filter-chip').forEach(b=>b.classList.remove('on'));
+      btn.classList.add('on');
+      renderGrades(btn.dataset.f);
+    };
+  });
+}
+function renderGrades(filter){
+  const sorted=[...allGrades].reverse().filter(g=>{
+    if(filter==='all') return true;
+    return scoreClass(parsePct(g.grade))===filter;
+  });
+  if(!sorted.length){
+    $('gradesList').innerHTML='<div class="empty"><i class="fas fa-inbox"></i><p>لا توجد درجات ضمن هذا التصنيف</p></div>';
+    return;
+  }
+  let html='<div class="list-group">';
+  html += sorted.map(g=>{
+    const cl=scoreClass(parsePct(g.grade));
+    return `<div class="list-row">
+      <div class="list-icon" style="background:${cl==='hi'?'var(--greenBg)':cl==='mid'?'var(--amberBg)':'var(--redBg)'};color:${cl==='hi'?'var(--green)':cl==='mid'?'var(--amber)':'var(--red)'}"><i class="fas fa-pen"></i></div>
+      <div class="list-body"><div class="list-title">${esc(g.subject)}</div><div class="list-sub">${esc(g.date)}</div></div>
+      <div class="list-value ${cl}">${esc(g.grade)}</div>
+    </div>`;
+  }).join('');
+  html += '</div>';
+  $('gradesList').innerHTML = html;
+}
+</script>
 </body>
 </html>
