@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
 <title>بوابة ولي الأمر — Mizan Academy IQ</title>
 <script src="https://www.gstatic.com/firebasejs/9.17.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.17.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.17.1/firebase-firestore-compat.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
@@ -271,6 +272,10 @@ firebase.initializeApp({
   appId:      "1:644598552588:web:fb226a15704bb65c377629"
 });
 const db = firebase.firestore();
+firebase.auth().signInAnonymously().catch(e => console.error('Auth error:', e));
+const authReady = new Promise(resolve => {
+  firebase.auth().onAuthStateChanged(user => { if (user) resolve(user); });
+});
 
 let S = { code:null, student:null, results:[], attendance:[], exams:[] };
 let allGrades = [];
@@ -342,6 +347,7 @@ async function doLogin(){
   if(!code){ toast('يرجى إدخال كود الطالب','w'); return; }
   loader('التحقق من الكود...');
   try{
+    await authReady;
     const doc=await db.collection('StudentPortal').doc(code).get();
     if(!doc.exists){ toast('الكود غير مسجّل في النظام','e'); unloader(); return; }
     S.code=code; S.student=doc.data();
